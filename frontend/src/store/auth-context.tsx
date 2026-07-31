@@ -29,6 +29,11 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "/api"
 
+function persistTokens(t: AuthTokens) {
+  document.cookie = `access_token=${t.access_token}; path=/; SameSite=Lax`
+  document.cookie = `refresh_token=${t.refresh_token}; path=/; SameSite=Lax`
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [tokens, setTokens] = useState<AuthTokens | null>(null)
@@ -64,8 +69,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           })
           if (refreshRes.ok) {
             const data = await refreshRes.json()
-            setTokens({ access_token: data.access_token, refresh_token: data.refresh_token })
+            const newTokens = { access_token: data.access_token, refresh_token: data.refresh_token }
+            setTokens(newTokens)
             setUser(data.user)
+            persistTokens(newTokens)
           }
         }
       } catch {
@@ -80,6 +87,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setTokens(newTokens)
     setUser(newUser)
     setAuthTokensInMemory(newTokens)
+    persistTokens(newTokens)
   }, [])
 
   const logout = useCallback(async () => {
