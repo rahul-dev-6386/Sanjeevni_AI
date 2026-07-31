@@ -6,6 +6,11 @@ uvicorn[standard]==0.24.0
 sqlalchemy==2.0.23
 alembic==1.13.0
 psycopg2-binary==2.9.9
+pgvector==0.4.2
+
+# Background tasks (Redis + RQ)
+redis==8.0.1
+rq==2.10.0
 
 # Auth & Security
 python-jose[cryptography]==3.3.0
