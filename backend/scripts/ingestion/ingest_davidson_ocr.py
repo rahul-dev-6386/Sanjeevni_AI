@@ -8,18 +8,14 @@ import os
 import re
 import sys
 import time
-import hashlib
-import base64
 import logging
 from pathlib import Path
 
 import fitz
-import httpx
 import tiktoken
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from app.core.config import settings
 from app.infrastructure.vector_store import vector_store
 from app.infrastructure.embedding_service import embedding_service
 
@@ -29,22 +25,12 @@ logger = logging.getLogger("ingest_davidson")
 BOOKS_DIR = Path(__file__).parent.parent.parent.parent / "books"
 DAVIDSON_PDF = BOOKS_DIR / "Disease Knowledge" / "Davidsons-Principles-Practice-of-Medicine-PDFDrive.com-.pdf"
 
-OPENROUTER_API_KEY = settings.OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY")
-VISION_MODELS = [
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
-]
 EMBEDDING_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2:free"  # Same as medical library
 EMBEDDING_DIM = 2048
 CHUNK_SIZE = 750
 CHUNK_OVERLAP = 125
 BATCH_SIZE = 64
-OCR_WORKERS = 4
 COLLECTION = "diseases"
-
-OCR_CACHE_DIR = Path(__file__).parent.parent.parent.parent / "backend" / "data" / "ocr_cache"
-OCR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 PROTECTED_BLOCKS = [
     re.compile(r"^\s*\|.+\|.+\|.*$", re.M),
@@ -81,135 +67,33 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-def extract_page_ocr(img_data: bytes) -> tuple[str, float]:
-    """Extract text from a rendered page (JPEG bytes) using OpenRouter Vision API with caching."""
-    start_time = time.time()
-
-    img_hash = hashlib.sha256(img_data).hexdigest()
-    cache_file = OCR_CACHE_DIR / f"{img_hash}.txt"
-    if cache_file.exists():
-        return cache_file.read_text(encoding="utf-8"), 0.0
-
-    b64_img = base64.b64encode(img_data).decode("utf-8")
-
-    prompt = (
-        "You are an OCR engine. Transcribe this page exactly as it appears. "
-        "Preserve headings, paragraphs, numbered lists, bullet points, tables, figure captions, references, and medical terminology. "
-        "Do not summarize, explain, correct, or interpret the content. Preserve the reading order. "
-        "If a word is unreadable, write [UNCLEAR] instead of guessing. Return only the extracted text."
-    )
-
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    max_retries = 3
-    for model in VISION_MODELS:
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
-                    ]
-                }
-            ],
-            "max_tokens": 4000,
-        }
-        for attempt in range(max_retries):
-            try:
-                with httpx.Client(timeout=180) as client:
-                    resp = client.post(url, headers=headers, json=payload)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if "choices" in data and data["choices"]:
-                        text = data["choices"][0]["message"]["content"].strip()
-                        if text and len(text.strip()) > 10 and "```" not in text[:50]:
-                            cache_file.write_text(text, encoding="utf-8")
-                            return text, time.time() - start_time
-                        raise ValueError("Empty or invalid OCR response")
-            except httpx.HTTPStatusError as e:
-                code = e.response.status_code
-                if code == 404 or code == 400 or (code == 429 and attempt >= max_retries - 1):
-                    logger.warning(f"Model {model} failed ({code}), trying next model...")
-                    break
-                if code == 429:
-                    sleep_time = (2 ** attempt) * 5
-                    logger.warning(f"Rate limited on {model}, retrying in {sleep_time}s...")
-                    time.sleep(sleep_time)
-                    continue
-                if attempt < max_retries - 1:
-                    sleep_time = (2 ** attempt) * 3
-                    logger.warning(f"OCR attempt {attempt + 1} failed on {model} ({e}), retrying in {sleep_time}s...")
-                    time.sleep(sleep_time)
-                else:
-                    logger.warning(f"Model {model} failed permanently ({e}), trying next model...")
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    sleep_time = (2 ** attempt) * 3
-                    logger.warning(f"OCR attempt {attempt + 1} failed on {model} ({e}), retrying in {sleep_time}s...")
-                    time.sleep(sleep_time)
-                else:
-                    logger.warning(f"Model {model} failed permanently ({e}), trying next model...")
-
-    logger.error(f"All OCR models failed for page")
-    return "", time.time() - start_time
-
-
 def extract_chapters_ocr(pdf_path: Path) -> list[dict]:
-    """Extract text from PDF using text extraction + OCR fallback for image pages.
-    OCR runs in parallel across pages; chapter detection stays sequential."""
+    """Extract text from PDF using text extraction only (no OCR)."""
     doc = fitz.open(str(pdf_path))
     results = []
     current_chapter = "Front Matter"
     current_section = "Introduction"
 
-    stats = {"total_pages": len(doc), "text_pages": 0, "ocr_pages": 0, "failed_pages": 0, "total_ocr_time": 0.0}
+    stats = {"total_pages": len(doc), "text_pages": 0, "failed_pages": 0}
 
     logger.info(f"Processing {stats['total_pages']} pages from {pdf_path.name}")
 
-    # Pass 1: identify pages needing OCR and render them
+    # Pass 1: extract text from pages
     page_texts: dict[int, str] = {}
-    ocr_targets: list[tuple[int, bytes]] = []
     for page_num in range(len(doc)):
         page = doc[page_num]
         text = page.get_text("text")
-        if not text.strip() or len(text.strip()) < 50:
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            ocr_targets.append((page_num, pix.tobytes("jpeg")))
-        else:
+        if text.strip() and len(text.strip()) >= 50:
             stats["text_pages"] += 1
             page_texts[page_num] = text
-
-    logger.info(f"Pages with text: {stats['text_pages']}, pages needing OCR: {len(ocr_targets)}")
-
-    # Pass 2: OCR all image pages in parallel
-    if ocr_targets:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        done = 0
-        with ThreadPoolExecutor(max_workers=OCR_WORKERS) as pool:
-            futures = {pool.submit(extract_page_ocr, img): num for num, img in ocr_targets}
-            for f in as_completed(futures):
-                num = futures[f]
-                text, ocr_time = f.result()
-                stats["total_ocr_time"] += ocr_time
-                page_texts[num] = text
-                done += 1
-                if not text.strip():
-                    stats["failed_pages"] += 1
-                    logger.warning(f"  OCR failed page {num + 1}/{len(doc)}")
-                else:
-                    stats["ocr_pages"] += 1
-                if done % 20 == 0 or done == len(ocr_targets):
-                    logger.info(f"  OCR progress: {done}/{len(ocr_targets)} pages (failed={stats['failed_pages']})")
+        else:
+            stats["failed_pages"] += 1
 
     doc.close()
 
-    # Pass 3: sequential chapter detection and section building
+    logger.info(f"Pages with text: {stats['text_pages']}, pages skipped (no text): {stats['failed_pages']}")
+
+    # Pass 2: sequential chapter detection and section building
     for page_num in sorted(page_texts):
         text = page_texts[page_num]
         if not text.strip():
@@ -272,7 +156,7 @@ def extract_chapters_ocr(pdf_path: Path) -> list[dict]:
     if buf:
         merged.append(buf)
 
-    logger.info(f"Extraction complete: {len(merged)} sections | Text: {stats['text_pages']} | OCR: {stats['ocr_pages']} | Failed: {stats['failed_pages']} | Total OCR time: {stats['total_ocr_time']:.1f}s")
+    logger.info(f"Extraction complete: {len(merged)} sections | Text: {stats['text_pages']} | Skipped (no text): {stats['failed_pages']}")
     return merged
 
 
@@ -351,16 +235,12 @@ def upload_batch(chunks: list[dict], vectors: list[list[float]], global_start: i
 
 
 def main():
-    if not OPENROUTER_API_KEY:
-        logger.error("OPENROUTER_API_KEY not set")
-        sys.exit(1)
-
     if not DAVIDSON_PDF.exists():
         logger.error(f"PDF not found: {DAVIDSON_PDF}")
         sys.exit(1)
 
-    logger.info(f"Starting OCR ingestion for Davidson's Principles and Practice of Medicine")
-    logger.info(f"Collection: {COLLECTION}, Embedding model: {EMBEDDING_MODEL}, Vision models: {', '.join(VISION_MODELS)}")
+    logger.info(f"Starting text extraction for Davidson's Principles and Practice of Medicine")
+    logger.info(f"Collection: {COLLECTION}, Embedding model: {EMBEDDING_MODEL}")
 
     # Extract
     t0 = time.time()
