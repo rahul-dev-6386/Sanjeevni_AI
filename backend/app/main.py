@@ -149,6 +149,9 @@ from app.domain.medical_library import indexer as lib_indexer
 try:
     lib_client = lib_indexer.get_client()
     lib_indexer.init_collections(lib_client)
+    # Ensure keyword payload index exists on every collection so that
+    # content_type filters work without a 400 "Index required" error.
+    lib_indexer.ensure_payload_indexes(lib_client)
     stats = lib_indexer.get_stats(lib_client)
     print(f"Medical Library initialized: {stats}")
 except Exception as e:

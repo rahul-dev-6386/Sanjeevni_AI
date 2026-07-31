@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -14,6 +14,7 @@ router = APIRouter(prefix="/api/reports", tags=["Medical Reports"])
 @router.post("/upload", status_code=status.HTTP_202_ACCEPTED)
 async def upload_report(
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> UploadStatusResponse:
@@ -30,7 +31,7 @@ async def upload_report(
         )
 
     service = ReportService(db)
-    report = await service.upload_async(current_user.id, file)
+    report = await service.upload_async(current_user.id, file, background_tasks)
     return UploadStatusResponse(report_id=report.id, status=report.status)
 
 

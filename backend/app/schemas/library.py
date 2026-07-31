@@ -23,6 +23,7 @@ class SourceInfo(BaseModel):
     page: str = ""
     text: str = ""
     score: float = 0.0
+    collection: str = ""
 
 
 class LibrarySearchResponse(BaseModel):

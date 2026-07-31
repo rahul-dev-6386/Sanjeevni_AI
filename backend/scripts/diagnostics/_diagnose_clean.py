@@ -1,6 +1,6 @@
 """Clean diagnostic report - one table per book."""
 import sys, os, re, fitz, tiktoken, json
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from app.domain.medical_library.pdf_extractor import extract_chapters, CHAPTER_PATTERN
 from app.domain.medical_library.chunker import chunk_all_sections
 

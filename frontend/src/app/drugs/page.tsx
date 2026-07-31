@@ -29,7 +29,6 @@ interface DrugInfo {
 }
 
 interface DrugAnswerResponse {
-  drug_name: string
   markdown: string
   references: string[]
 }
@@ -146,7 +145,7 @@ export default function DrugsPage() {
   }
 
   const selectDrug = (drug: DrugInfo) => {
-    const name = drug.brand_name || drug.generic_name || ""
+    const name = drug.generic_name || drug.brand_name || ""
     setSelecting(true)
     fetchAnswer(name).finally(() => setSelecting(false))
     window.scrollTo({ top: 0, behavior: "smooth" })
@@ -385,7 +384,7 @@ export default function DrugsPage() {
                   <DrugAnswer
                     markdown={answer.markdown}
                     references={answer.references}
-                    drugName={answer.drug_name}
+                    drugName={lastSearchedTerm || query}
                     isAi={answerIsAi || phase === "ai_result"}
                     onBack={handleBack}
                   />

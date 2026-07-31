@@ -4,7 +4,7 @@ Tests retrieval, reranking, citation quality, and cross-collection routing.
 Searches ALL collections per query to evaluate routing correctness.
 """
 import sys, os, time, json, logging
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("medical_library").setLevel(logging.WARNING)

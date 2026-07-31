@@ -3,7 +3,7 @@ Seed drug interaction data from curated clinical knowledge.
 Populates the DrugInteraction table with well-known drug-drug interactions.
 """
 import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from app.core.database import SessionLocal
 from app.services.drug_service import DrugService

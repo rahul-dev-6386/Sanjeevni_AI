@@ -56,7 +56,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       animate={{ width: collapsed ? 72 : 260 }}
       className={cn(
         "fixed left-0 top-0 bottom-0 z-40",
-        "bg-[#0B0F1A]/98 border-r border-[#2B364A]",
+        "bg-[#0B0F1A] border-r border-[#2B364A]",
         "flex flex-col overflow-hidden"
       )}
     >

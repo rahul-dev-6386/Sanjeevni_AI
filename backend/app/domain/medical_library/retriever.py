@@ -78,6 +78,9 @@ def _get_bm25_index(collection: str) -> tuple[BM25Okapi, list[str]]:
         payloads = []
         for point in scroll[0]:
             if point.payload and point.payload.get("text"):
+                # Skip non-content pages (e.g. TOC, Index)
+                if point.payload.get("content_type", "content") != "content":
+                    continue
                 texts.append(point.payload["text"])
                 payloads.append({
                     "collection": collection,
@@ -117,12 +120,22 @@ def _semantic_search(
     top_k: int = 50,
     client=None,
 ) -> list[dict]:
+    from qdrant_client.http import models as qm
+    
     if client is None:
         client = indexer.get_client()
     try:
         response = client.query_points(
             collection_name=collection,
             query=query_vec,
+            query_filter=qm.Filter(
+                must=[
+                    qm.FieldCondition(
+                        key="content_type",
+                        match=qm.MatchValue(value="content")
+                    )
+                ]
+            ),
             limit=top_k,
             with_payload=True,
         )
@@ -276,11 +289,16 @@ def search(
         results = results[:top_k]
 
     if use_reranker and len(results) > 1:
-        results = rerank(query, results, top_k=top_k)
+        results = rerank(query, results, top_k=top_k*2)
     else:
-        results = results[:top_k]
+        results = results[:top_k*2]
 
-    return results
+    # Stage 9: Validation
+    from app.domain.medical_library.validator import RAGValidator
+    validator = RAGValidator(query)
+    results = validator.validate_results(results)
+    
+    return results[:top_k]
 
 
 def format_citation(result: dict) -> str:

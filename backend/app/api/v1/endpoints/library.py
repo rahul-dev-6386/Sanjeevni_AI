@@ -69,7 +69,8 @@ def library_search(
 def library_sources(
     db: Session = Depends(get_db),
 ):
-    stats = indexer.get_stats()
+    client = indexer.get_client()
+    stats = indexer.get_stats(client)
     collections = [
         LibraryCollectionInfo(name=name, chunk_count=count)
         for name, count in stats.items()

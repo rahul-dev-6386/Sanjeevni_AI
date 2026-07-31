@@ -343,8 +343,8 @@ class ChatService:
                     parts.append(f"summary: {r.ai_summary[:200]}")
                 if r.health_score is not None:
                     parts.append(f"health score: {r.health_score}/10")
-                if r.risk_level:
-                    parts.append(f"risk: {r.risk_level}")
+                if r.risk_scores:
+                    parts.append(f"risk scores: available")
                 report_summary.append("; ".join(parts))
             summary_parts.append(f"Recent Medical Reports:\n" + "\n".join(f"  - {s}" for s in report_summary))
 

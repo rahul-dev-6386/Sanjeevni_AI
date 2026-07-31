@@ -5,9 +5,9 @@ Supports two sources:
   2. Local on-disk Qdrant (System B - Medical Library) — reads 4 collections
 
 Usage:
-    python scripts/migrate_faiss_to_qdrant.py              # all sources
-    python scripts/migrate_faiss_to_qdrant.py --source faiss
-    python scripts/migrate_faiss_to_qdrant.py --source local_qdrant
+    python scripts/ingestion/migrate_faiss_to_qdrant.py              # all sources
+    python scripts/ingestion/migrate_faiss_to_qdrant.py --source faiss
+    python scripts/ingestion/migrate_faiss_to_qdrant.py --source local_qdrant
 """
 
 import os
@@ -17,7 +17,7 @@ import pickle
 import logging
 import argparse
 
-sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from app.core.config import settings
 

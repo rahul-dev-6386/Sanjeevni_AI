@@ -7,7 +7,7 @@ import sys
 import logging
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from app.core.database import SessionLocal
 from app.domain.dailymed.models import DrugDocument

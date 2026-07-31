@@ -98,17 +98,20 @@ def drug_count(
 def drug_answer(
     q: str = Query(..., description="Drug name to generate answer for"),
     skip_local: bool = Query(False, description="Skip local DB search and use AI directly"),
+    patient_mode: bool = Query(False, description="Use patient-friendly language"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     service = DrugConsultService(db)
     result = service.generate_drug_answer(q, skip_local_search=skip_local)
+    result["patient_mode"] = patient_mode
     return result
 
 
 @router.get("/ai-search")
 def ai_search_drug(
     q: str = Query(..., description="Drug name to search via AI"),
+    patient_mode: bool = Query(False, description="Use patient-friendly language"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -118,6 +121,7 @@ def ai_search_drug(
     """
     service = DrugConsultService(db)
     result = service.generate_drug_answer(q, skip_local_search=True)
+    result["patient_mode"] = patient_mode
     return result
 
 

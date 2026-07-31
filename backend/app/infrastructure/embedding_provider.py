@@ -30,10 +30,10 @@ class EmbeddingProvider(ABC):
 
 
 class OpenRouterEmbeddingProvider(EmbeddingProvider):
-    def __init__(self):
+    def __init__(self, model_name: Optional[str] = None, dimension: Optional[int] = None):
         self.api_key = settings.OPENROUTER_API_KEY
-        self._model = settings.EMBEDDING_MODEL
-        self._dim = settings.EMBEDDING_DIMENSION
+        self._model = model_name or settings.EMBEDDING_MODEL
+        self._dim = dimension or settings.EMBEDDING_DIMENSION
         self._url = "https://openrouter.ai/api/v1/embeddings"
 
     def embed(self, text: str) -> list[float]:

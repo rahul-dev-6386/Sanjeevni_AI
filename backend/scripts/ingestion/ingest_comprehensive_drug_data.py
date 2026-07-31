@@ -6,13 +6,13 @@ in priority order, merges results, stores them in the database, and
 generates embeddings.
 
 Usage:
-    python scripts/ingest_comprehensive_drug_data.py
+    python scripts/ingestion/ingest_comprehensive_drug_data.py
 """
 import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from app.core.database import SessionLocal
 from app.services.drug_service import DrugService
@@ -162,7 +162,7 @@ def reindex_embeddings():
         print(f"Found {len(drugs)} drugs to re-index")
         for drug in drugs:
             try:
-                text = service._build_drug_text(service._entry_to_dict(drug))
+                text = service._build_drug_text(service._entry_to_dict(drug))[:24000]
                 emb = embedding_service.embed_document(text)
                 vector_store.upsert(
                     embedding_id=drug.embedding_id,

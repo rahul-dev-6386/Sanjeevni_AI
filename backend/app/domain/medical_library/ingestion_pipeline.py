@@ -57,20 +57,33 @@ def process_book(book_name: str, pdf_rel_path: str, collection: str) -> dict:
     logger.info(f"Processing: {book_name}")
 
     t0 = time.time()
-    sections = extract_chapters(pdf_path)
-    for s in sections:
-        s["book"] = book_name
-    result["sections"] = len(sections)
-    logger.info(f"  Extracted {len(sections)} sections ({time.time()-t0:.1f}s)")
+    
+    # Stage 1: PDF Cleaner
+    from app.domain.medical_library.pdf_cleaner import PDFCleaner
+    cleaner = PDFCleaner(pdf_path)
+    clean_pages = cleaner.extract_clean_text()
+    
+    # Stage 2 & 4: Semantic Chunker
+    from app.domain.medical_library.semantic_chunker import SemanticChunker
+    chunker = SemanticChunker()
+    chunks = chunker.chunk_pages(clean_pages, book_name)
+    
+    # Stage 3: Metadata Extraction
+    from app.domain.medical_library.metadata_extractor import MetadataExtractor
+    extractor = MetadataExtractor()
+    enriched_chunks = [extractor.enrich_chunk(c) for c in chunks]
+    
+    # Filter out index and toc pages completely
+    valid_chunks = [c for c in enriched_chunks if c["metadata"]["content_type"] == "content"]
+    
+    result["chunks_generated"] = len(valid_chunks)
+    logger.info(f"  Created {len(valid_chunks)} chunks ({time.time()-t0:.1f}s)")
 
-    t0 = time.time()
-    chunks = chunk_all_sections(sections)
-    result["chunks_generated"] = len(chunks)
-    logger.info(f"  Created {len(chunks)} chunks ({time.time()-t0:.1f}s)")
-
-    if not chunks:
+    if not valid_chunks:
         return result
 
+    # Rename valid_chunks to chunks for downstream
+    chunks = valid_chunks
     client = indexer.get_client()
     batch_size = 128
     total_uploaded = 0

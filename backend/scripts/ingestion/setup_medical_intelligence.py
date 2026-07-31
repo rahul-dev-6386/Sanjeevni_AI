@@ -56,7 +56,7 @@ def run_script(script_path, description):
 
 def main():
     total_steps = 7
-    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     os.chdir(backend_dir)
     sys.path.insert(0, backend_dir)
 
@@ -97,7 +97,7 @@ def main():
     # Step 3: Download medical guidelines
     log_step(3, total_steps, "Downloading medical guidelines (WHO, CDC, ADA, AHA, KDIGO, NIH)")
     try:
-        from scripts.download_guidelines import download_guidelines
+        from scripts.ingestion.download_guidelines import download_guidelines
         download_guidelines()
         log_done("Medical guidelines downloaded")
     except Exception as e:
@@ -106,7 +106,7 @@ def main():
     # Step 4: Download drug data from OpenFDA
     log_step(4, total_steps, "Downloading drug information from OpenFDA")
     try:
-        from scripts.download_drug_data import download_drug_data
+        from scripts.ingestion.download_drug_data import download_drug_data
         download_drug_data()
         log_done("Drug data downloaded")
     except Exception as e:
@@ -115,7 +115,7 @@ def main():
     # Step 5: Download PubMed articles
     log_step(5, total_steps, "Downloading PubMed research articles")
     try:
-        from scripts.download_pubmed import download_pubmed
+        from scripts.ingestion.download_pubmed import download_pubmed
         download_pubmed()
         log_done("PubMed articles downloaded")
     except Exception as e:
@@ -124,7 +124,7 @@ def main():
     # Step 6: Train risk prediction models
     log_step(6, total_steps, "Training risk prediction models")
     try:
-        from scripts.train_risk_models import train_all
+        from scripts.maintenance.train_risk_models import train_all
         train_all()
         log_done("Risk models trained")
     except Exception as e:

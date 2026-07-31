@@ -12,7 +12,7 @@ class UserReportChunk(Base):
     report_id = Column(Integer, ForeignKey("medical_reports.id", ondelete="CASCADE"), nullable=False)
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(Vector(1536))
+    embedding = Column(Vector(2048))
     report_type = Column(String(100))
     hospital = Column(String(255))
     doctor = Column(String(255))

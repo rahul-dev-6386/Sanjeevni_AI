@@ -14,6 +14,11 @@ import {
 interface Source {
   book: string
   text: string
+  collection: string
+  chapter?: string
+  section?: string
+  page?: string
+  score?: number
 }
 
 interface SearchResponse {
@@ -33,13 +38,32 @@ const itemVariants = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: "easeOut" } },
 }
 
-const RELATED_TOPICS = [
-  "Liver function tests interpretation",
-  "Hepatitis diagnosis",
-  "Jaundice workup",
-  "Elevated liver enzymes causes",
-  "Hepatic panel components",
-]
+const TOPIC_SUGGESTIONS: Record<string, string[]> = {
+  diabetes: ["Diabetic nephropathy", "Insulin resistance mechanism", "HbA1c targets", "Metformin dosing", "Diabetic neuropathy management"],
+  hypertension: ["JNC 8 guidelines", "ACE inhibitor mechanism", "Beta blockers in heart failure", "Secondary hypertension causes", "DASH diet evidence"],
+  cardiovascular: ["Heart failure classification", "Atrial fibrillation management", "Statin therapy guidelines", "Coronary artery disease workup", "Cardiac biomarkers"],
+  liver: ["Liver function tests interpretation", "Hepatitis B management", "Cirrhosis complications", "Elevated ALT causes", "NASH diagnosis"],
+  kidney: ["CKD staging", "Proteinuria interpretation", "Dialysis indications", "Contrast nephropathy prevention", "Renal biopsy indications"],
+  pharmacology: ["Drug-drug interactions", "Antibiotic resistance mechanisms", "Beta-lactam spectrum", "NSAID contraindications", "Opioid adverse effects"],
+  infection: ["Sepsis management", "Antibiotic stewardship", "UTI treatment", "Pneumonia empirical therapy", "MRSA treatment"],
+  respiratory: ["COPD management", "Asthma step therapy", "Pulmonary embolism diagnosis", "Pleural effusion causes", "Spirometry interpretation"],
+  default: ["Type 2 diabetes management", "Hypertension guidelines", "Heart failure treatment", "Antibiotic selection", "Lab value interpretation"],
+}
+
+function getRelatedTopics(query: string, result: SearchResponse | null): string[] {
+  const q = query.toLowerCase()
+  for (const [key, topics] of Object.entries(TOPIC_SUGGESTIONS)) {
+    if (key !== "default" && q.includes(key)) return topics
+  }
+  // Try matching against returned book collections
+  if (result?.sources?.length) {
+    const collections = Array.from(new Set(result.sources.map((s: any) => s.collection).filter(Boolean)))
+    if (collections.includes("pharmacology")) return TOPIC_SUGGESTIONS.pharmacology
+    if (collections.includes("laboratory")) return TOPIC_SUGGESTIONS.liver
+    if (collections.includes("clinical_practice")) return TOPIC_SUGGESTIONS.cardiovascular
+  }
+  return TOPIC_SUGGESTIONS.default
+}
 
 export default function LibrarySearchPage() {
   return (
@@ -62,11 +86,13 @@ function LibrarySearchPageInner() {
 
   const [query, setQuery] = useState(initialQuery)
   const [loading, setLoading] = useState(false)
+  const [loadingMsg, setLoadingMsg] = useState("Searching...")
   const [result, setResult] = useState<SearchResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [selectedRef, setSelectedRef] = useState<Source | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (initialQuery) {
@@ -77,21 +103,57 @@ function LibrarySearchPageInner() {
   const handleSearch = useCallback(async (q?: string) => {
     const searchQuery = q ?? query
     if (!searchQuery.trim()) return
+
+    // Cancel any in-flight search
+    if (abortRef.current) abortRef.current.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     setLoading(true)
+    setLoadingMsg("Searching medical library...")
     setError(null)
     setResult(null)
     setEvidenceOpen(false)
     setSelectedRef(null)
 
+    // Show progress messages during long AI calls
+    const msgTimer = setTimeout(() => setLoadingMsg("Generating AI answer from textbooks..."), 5000)
+    const msgTimer2 = setTimeout(() => setLoadingMsg("Almost done — synthesizing evidence..."), 20000)
+
+    const AI_TIMEOUT_MS = 90_000 // 90 seconds
+
     try {
       const params = new URLSearchParams({ q: searchQuery.trim(), top_k: "5", mode: "search_with_ai" })
-      const data = await apiFetch(`/library/search?${params}`)
-      setResult(data)
-      router.replace(`/library/search?q=${encodeURIComponent(searchQuery.trim())}`, { scroll: false })
+      const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS)
+      try {
+        const data = await apiFetch(`/library/search?${params}`, { signal: controller.signal })
+        clearTimeout(timeoutId)
+        setResult(data)
+        router.replace(`/library/search?q=${encodeURIComponent(searchQuery.trim())}`, { scroll: false })
+      } catch (e: any) {
+        clearTimeout(timeoutId)
+        // If aborted (timeout), fall back to search_only
+        if (e.name === "AbortError" || e.message?.includes("aborted") || e.message?.includes("abort")) {
+          setLoadingMsg("AI timed out — showing search results...")
+          const fallbackParams = new URLSearchParams({ q: searchQuery.trim(), top_k: "8", mode: "search_only" })
+          const fallbackController = new AbortController()
+          abortRef.current = fallbackController
+          const fallbackData = await apiFetch(`/library/search?${fallbackParams}`, { signal: fallbackController.signal })
+          setResult(fallbackData)
+          router.replace(`/library/search?q=${encodeURIComponent(searchQuery.trim())}`, { scroll: false })
+        } else {
+          throw e
+        }
+      }
     } catch (e: any) {
-      setError(e.message || "Search failed")
+      if (e.name !== "AbortError") {
+        setError(e.message || "Search failed. Please try again.")
+      }
     } finally {
+      clearTimeout(msgTimer)
+      clearTimeout(msgTimer2)
       setLoading(false)
+      setLoadingMsg("Searching...")
     }
   }, [query, router])
 
@@ -178,15 +240,21 @@ function LibrarySearchPageInner() {
 
           {/* Loading skeleton */}
           {loading && (
-            <motion.div variants={itemVariants} className="space-y-4 animate-pulse w-full max-w-4xl">
-              <div className="h-5 w-1/4 skeleton rounded-lg" />
-              <div className="h-4 w-full skeleton rounded-lg" />
-              <div className="h-4 w-5/6 skeleton rounded-lg" />
-              <div className="h-4 w-3/4 skeleton rounded-lg" />
-              <div className="h-4 w-full skeleton rounded-lg" />
-              <div className="h-4 w-2/3 skeleton rounded-lg" />
-              <div className="h-4 w-4/5 skeleton rounded-lg" />
-              <div className="h-4 w-full skeleton rounded-lg" />
+            <motion.div variants={itemVariants} className="space-y-4 w-full max-w-4xl">
+              <div className="flex items-center gap-2 mb-4">
+                <Loader2 className="h-4 w-4 text-[#22C55E] animate-spin shrink-0" />
+                <span className="text-sm text-[#94A3B8] animate-pulse">{loadingMsg}</span>
+              </div>
+              <div className="space-y-3 animate-pulse">
+                <div className="h-5 w-1/4 skeleton rounded-lg" />
+                <div className="h-4 w-full skeleton rounded-lg" />
+                <div className="h-4 w-5/6 skeleton rounded-lg" />
+                <div className="h-4 w-3/4 skeleton rounded-lg" />
+                <div className="h-4 w-full skeleton rounded-lg" />
+                <div className="h-4 w-2/3 skeleton rounded-lg" />
+                <div className="h-4 w-4/5 skeleton rounded-lg" />
+                <div className="h-4 w-full skeleton rounded-lg" />
+              </div>
             </motion.div>
           )}
 
@@ -290,7 +358,7 @@ function LibrarySearchPageInner() {
               <div className="w-full max-w-[90%] 2xl:max-w-[85%]">
                 <p className="text-xs text-[#94A3B8] font-medium uppercase tracking-wider mb-3">Related</p>
                 <div className="flex flex-wrap gap-2">
-                  {RELATED_TOPICS.map((topic) => (
+                  {getRelatedTopics(query, result).map((topic) => (
                     <button
                       key={topic}
                       onClick={() => {
@@ -366,11 +434,35 @@ function LibrarySearchPageInner() {
                 <div className="space-y-6">
                   <div>
                     <p className="text-xs text-[#94A3B8] font-medium uppercase tracking-wider mb-2">Source</p>
-                    <div className="flex items-center gap-2 text-sm text-[#F9FAFB]">
-                      <BookOpen className="h-4 w-4 text-[#22C55E] shrink-0" />
-                      {selectedRef.book}
+                    <div className="flex items-start gap-2 text-sm text-[#F9FAFB]">
+                      <BookOpen className="h-4 w-4 text-[#22C55E] shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-medium">{selectedRef.book}</p>
+                        {selectedRef.chapter && <p className="text-xs text-[#94A3B8] mt-0.5">Chapter: {selectedRef.chapter}</p>}
+                        {selectedRef.page && <p className="text-xs text-[#94A3B8]">Page: {selectedRef.page}</p>}
+                        {selectedRef.collection && (
+                          <span className="inline-block mt-1 text-[10px] px-2 py-0.5 rounded-full bg-[#22C55E]/10 text-[#22C55E] border border-[#22C55E]/20 capitalize">
+                            {selectedRef.collection.replace(/_/g, " ")}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
+
+                  {selectedRef.score !== undefined && (
+                    <div>
+                      <p className="text-xs text-[#94A3B8] font-medium uppercase tracking-wider mb-2">Relevance</p>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 h-1.5 bg-white/[0.06] rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-[#22C55E] rounded-full"
+                            style={{ width: `${Math.min(100, selectedRef.score * 100)}%` }}
+                          />
+                        </div>
+                        <span className="text-xs text-[#94A3B8]">{(selectedRef.score * 100).toFixed(0)}%</span>
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <p className="text-xs text-[#94A3B8] font-medium uppercase tracking-wider mb-2">Excerpt</p>

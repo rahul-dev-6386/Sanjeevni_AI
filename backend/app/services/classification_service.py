@@ -44,61 +44,55 @@ class ClassificationService:
     def _build_extraction_prompt(self, text: str, document_type: str) -> str:
         type_specific = {
             "Blood Test Report": (
-                "Extract: patient_info (name, age, sex), lab_values (array of {test_name, value, unit, reference_range, flag}), "
-                "diagnosis (array), findings (array), recommendations (array), biomarkers (array of {name, value, unit, status})"
+                "lab_values: array of {test_name, value, unit, reference_range, flag}\n"
+                "biomarkers: array of {name, value, unit, status}"
             ),
             "Prescription": (
-                "Extract: patient_info (name, age, sex), diagnosis (array), medications (array of {name, dosage, frequency, duration, instructions}), "
-                "recommendations (array), doctor_info (name, registration)"
+                "medications: array of {name, dosage, frequency, duration, instructions}\n"
+                "doctor_info: {name, registration}"
             ),
-            "X-Ray": (
-                "Extract: patient_info (name, age, sex), body_part, findings (array), impression (string), "
-                "recommendations (array), confidence (string)"
-            ),
-            "MRI": (
-                "Extract: patient_info (name, age, sex), body_part, findings (array), impression (string), "
-                "recommendations (array), confidence (string)"
-            ),
-            "CT Scan": (
-                "Extract: patient_info (name, age, sex), body_part, findings (array), impression (string), "
-                "recommendations (array), confidence (string)"
-            ),
-            "ECG": (
-                "Extract: patient_info (name, age, sex), heart_rate, rhythm, findings (array), "
-                "diagnosis (array), recommendations (array)"
-            ),
-            "Vaccination Record": (
-                "Extract: patient_info (name, age, sex), vaccines (array of {name, date, dose, next_due}), "
-                "notes (string)"
-            ),
+            "X-Ray": "body_part: string, findings: array, impression: string, confidence: string",
+            "MRI": "body_part: string, findings: array, impression: string, confidence: string",
+            "CT Scan": "body_part: string, findings: array, impression: string, confidence: string",
+            "ECG": "heart_rate: string, rhythm: string, findings: array",
+            "Vaccination Record": "vaccines: array of {name, date, dose, next_due}, notes: string",
             "Discharge Summary": (
-                "Extract: patient_info (name, age, sex), admission_date, discharge_date, diagnosis (array), "
-                "procedures (array), medications (array of {name, dosage, frequency, duration}), "
-                "follow_up_plan (string), recommendations (array)"
+                "admission_date: string, discharge_date: string, procedures: array, "
+                "medications: array of {name, dosage, frequency, duration}, follow_up_plan: string"
             ),
             "Medical Certificate": (
-                "Extract: patient_info (name, age, sex), certificate_type, diagnosis (array), "
-                "valid_from, valid_until, restrictions (array), doctor_info (name, registration)"
+                "certificate_type: string, valid_from: string, valid_until: string, "
+                "restrictions: array, doctor_info: {name, registration}"
             ),
             "Insurance Document": (
-                "Extract: patient_info (name, age, sex), policy_number, provider, coverage_details (array), "
-                "validity_period, claims (array)"
+                "policy_number: string, provider: string, coverage_details: array, "
+                "validity_period: string, claims: array"
             ),
-            "General Medical Report": (
-                "Extract: patient_info (name, age, sex), diagnosis (array), findings (array), "
-                "recommendations (array), lab_values (array of {test_name, value, unit})"
-            ),
+            "General Medical Report": "lab_values: array of {test_name, value, unit}, findings: array",
         }
+        
         extraction_guide = type_specific.get(document_type, type_specific["General Medical Report"])
+        
         return (
-            f"Document type: {document_type}\n\n"
-            f"{extraction_guide}\n\n"
-            "Also extract always: health_score (0-100 based on overall health indicators), "
-            "risk_scores (object with keys: diabetes, heart_disease, kidney_disease, liver_disease, hypertension, vitamin_deficiency, obesity; each 0-100), "
-            "follow_up_tests (array of strings), timeline_events (array of {date, event, type}), "
-            "abnormal_values (array of {test, value, unit, severity})\n\n"
-            "Return ONLY valid JSON. No markdown. No explanations.\n\n"
-            f"Document text:\n{text[:5000]}"
+            f"You are a strict medical data extraction AI. Extract data from the following {document_type}.\n\n"
+            "REQUIREMENTS:\n"
+            "1. Output ONLY a raw, valid JSON object.\n"
+            "2. Do NOT wrap the JSON in markdown blocks (no ```json ... ```).\n"
+            "3. Do NOT add any conversational text or explanations before or after the JSON.\n"
+            "4. Follow this exact JSON schema template (fill in the values based on the text):\n\n"
+            "{\n"
+            '  "patient_info": {"name": "", "age": null, "sex": ""},\n'
+            '  "diagnosis": [],\n'
+            '  "recommendations": [],\n'
+            '  "health_score": <0-100 integer>,\n'
+            '  "risk_scores": {"diabetes": <0-100>, "heart_disease": <0-100>, "kidney_disease": <0-100>, "liver_disease": <0-100>, "hypertension": <0-100>, "vitamin_deficiency": <0-100>, "obesity": <0-100>},\n'
+            '  "follow_up_tests": [],\n'
+            '  "timeline_events": [{"date": "", "event": "", "type": ""}],\n'
+            '  "abnormal_values": [{"test": "", "value": "", "unit": "", "severity": ""}],\n'
+            f"  // Add these specific fields for {document_type}:\n"
+            f"  // {extraction_guide}\n"
+            "}\n\n"
+            f"DOCUMENT TEXT:\n---\n{text[:6000]}\n---"
         )
 
     def _fallback_extract(self, text: str, document_type: str) -> dict:

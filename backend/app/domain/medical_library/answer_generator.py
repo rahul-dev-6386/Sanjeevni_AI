@@ -336,36 +336,46 @@ class AnswerGenerator:
         import time
         t0 = time.time()
 
-        results = retriever.search(query, collection=collection, top_k=top_k + 4)
+        results = retriever.search(query, collection=collection, top_k=top_k + 4, use_reranker=True)
         elapsed = round((time.time() - t0) * 1000)
 
-        context_texts, used_books = compress_context(results)
         intent = classify_query_intent(query)
-        system_prompt = _get_system_prompt(intent)
-        user_prompt = _build_user_prompt(query, context_texts, intent)
+        provider = self._get_ai_provider()
+        answer = None
+        mode = "ai_failed"
 
+        # ─── DIRECT RAG: retrieve → compress → prompt → AI (single call) ─────
+        # Simple, reliable pipeline. Works with any model, no JSON parsing needed.
         try:
-            provider = self._get_ai_provider()
-            answer = provider.generate_response(
-                prompt=user_prompt,
-                system_instruction=system_prompt,
-                temperature=0.3,
-            )
-            mode = "ai_generated"
+            context_texts, used_books = compress_context(results)
+            if context_texts:
+                system_prompt = _get_system_prompt(intent)
+                user_prompt = _build_user_prompt(query, context_texts, intent)
+                logger.info(f"RAG search: {len(context_texts)} chunks, intent={intent.value}, model chain active")
+                raw_answer = provider.generate_response(
+                    user_prompt, system_instruction=system_prompt, temperature=0.3
+                )
+                if raw_answer and len(raw_answer) >= 20 and "AI temporarily unavailable" not in raw_answer:
+                    answer = raw_answer
+                    mode = "ai_generated"
+                    logger.info(f"RAG answer generated successfully ({len(answer)} chars)")
+                else:
+                    logger.warning(f"AI returned empty/short answer: {repr(raw_answer[:100] if raw_answer else '')}")
+            else:
+                logger.warning("No RAG chunks found for query")
         except Exception as e:
-            logger.warning(f"AI answer generation failed: {e}")
+            logger.warning(f"RAG answer generation failed: {e}")
             answer = None
             mode = "ai_failed"
 
-        if answer and len(answer) < 20:
-            answer = None
-            mode = "ai_failed"
-
+        # ─── REFERENCES & SOURCES ─────────────────────────────────────────────
         references = []
         follow_up_questions = []
         if answer:
-            references = list(used_books)
-            answer += format_references(references)
+            unique_books = set([r.get("source_book") for r in results if r.get("source_book")])
+            references = list(unique_books)
+            if "## References" not in answer and "## 📚 References" not in answer:
+                answer += format_references(references)
 
         sources = [
             {
@@ -393,7 +403,6 @@ class AnswerGenerator:
                 "latency_ms": elapsed,
                 "collection_searched": collection or "all",
                 "chunks_retrieved": len(results),
-                "chunks_after_compression": len(context_texts),
                 "intent": intent.value,
             },
         }

@@ -11,37 +11,19 @@ from app.ocr import medical_postprocess
 
 logger = logging.getLogger(__name__)
 
-PADDOCR_THRESHOLD = 0.85
-TROCR_THRESHOLD = 0.70
-
-
 class OcrManager:
     def __init__(self):
-        self._paddle = None
-        self._trocr = None
+        self._openrouter = None
 
-    def _get_paddle(self):
-        if self._paddle is None:
-            from app.ocr import paddle_engine
-            self._paddle = paddle_engine
-        return self._paddle
-
-    def _get_trocr(self):
-        if self._trocr is None:
-            from app.ocr import trocr_engine
-            self._trocr = trocr_engine
-        return self._trocr
+    def _get_openrouter(self):
+        if self._openrouter is None:
+            from app.ocr import openrouter_vision_engine
+            self._openrouter = openrouter_vision_engine
+        return self._openrouter
 
     def _bytes_to_cv2(self, file_bytes: bytes) -> np.ndarray:
         arr = np.frombuffer(file_bytes, dtype=np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-
-    def _is_handwritten(self, image: np.ndarray, paddle_text: str, paddle_conf: float) -> bool:
-        if paddle_conf < 0.6:
-            return True
-        if len(paddle_text.strip()) < 10:
-            return True
-        return False
 
     def extract_text(self, file_bytes: bytes, file_type: str) -> str:
         result = self.extract_structured(file_bytes, file_type)
@@ -69,41 +51,50 @@ class OcrManager:
         processed = preprocessing.preprocess(image)
         processed = preprocessing.resize_for_ocr(processed)
 
-        paddle = self._get_paddle()
-        paddle_text, paddle_conf = paddle.run(processed)
-        logger.info(f"PaddleOCR confidence: {paddle_conf}")
+        openrouter = self._get_openrouter()
+        text, conf, _ = openrouter.run(processed)
+        
+        engine_used = "OpenRouterVision"
+        logger.info(f"OpenRouterVision confidence: {conf}")
 
-        is_handwritten = self._is_handwritten(image, paddle_text, paddle_conf)
-        engine_used = "PaddleOCR"
-        final_text = paddle_text
-        final_conf = paddle_conf
-
-        if is_handwritten or paddle_conf < PADDOCR_THRESHOLD:
-            logger.info("Handwriting detected or low PaddleOCR confidence — falling back to TrOCR")
-            trocr = self._get_trocr()
-            trocr_text, trocr_conf = trocr.run(processed)
-            logger.info(f"TrOCR confidence: {trocr_conf}")
-
-            if trocr_conf > paddle_conf or trocr_conf >= TROCR_THRESHOLD:
-                final_text = trocr_text
-                final_conf = trocr_conf
-                engine_used = "TrOCR"
-
-        overall_conf = conf_module.assess(final_text, engine_used, paddle_conf, final_conf)
-        result = medical_postprocess.postprocess(final_text, engine_used, overall_conf)
+        overall_conf = conf_module.assess(text, engine_used, conf, conf)
+        result = medical_postprocess.postprocess(text, engine_used, overall_conf)
         return result
 
     def _process_pdf(self, file_bytes: bytes) -> dict:
+        # 1. Try local extraction first for digitally generated PDFs
+        try:
+            import PyPDF2
+            reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+            embedded_text = ""
+            for page in reader.pages:
+                embedded_text += page.extract_text() or ""
+                
+            if len(embedded_text.strip()) > 150:
+                logger.info("PDF has embedded text. Bypassing OCR entirely.")
+                overall_conf = conf_module.assess(embedded_text, "PyPDF2", 1.0)
+                return {
+                    "raw_text": embedded_text,
+                    "confidence": 1.0,
+                    "engine": "PyPDF2",
+                    "structured_data": medical_postprocess.postprocess(
+                        embedded_text, "PyPDF2", overall_conf
+                    ).get("structured_data", {}),
+                }
+        except Exception as e:
+            logger.info(f"Local PyPDF2 extraction not applicable: {e}")
+
+        # 2. Proceed with OCR for scanned PDFs
         try:
             from pdf2image import convert_from_bytes
             images = convert_from_bytes(file_bytes, dpi=300)
         except Exception as e:
-            logger.warning(f"PDF conversion failed, trying PyPDF2 fallback: {e}")
+            logger.warning(f"PDF to image conversion failed: {e}")
             return self._pdf_fallback(file_bytes)
 
         all_text = []
         all_conf = 0.0
-        engine_used = "PaddleOCR"
+        engine_used = "OpenRouterVision"
         count = 0
 
         for page_image in images:
@@ -111,20 +102,9 @@ class OcrManager:
             processed = preprocessing.preprocess(arr)
             processed = preprocessing.resize_for_ocr(processed)
 
-            paddle = self._get_paddle()
-            paddle_text, paddle_conf = paddle.run(processed)
-            is_handwritten = self._is_handwritten(arr, paddle_text, paddle_conf)
-            page_text = paddle_text
-            page_conf = paddle_conf
-
-            if is_handwritten or paddle_conf < PADDOCR_THRESHOLD:
-                trocr = self._get_trocr()
-                trocr_text, trocr_conf = trocr.run(processed)
-                if trocr_conf > paddle_conf or trocr_conf >= TROCR_THRESHOLD:
-                    page_text = trocr_text
-                    page_conf = trocr_conf
-                    engine_used = "TrOCR"
-
+            openrouter = self._get_openrouter()
+            page_text, page_conf, _ = openrouter.run(processed)
+            
             if page_text.strip():
                 all_text.append(page_text)
                 all_conf += page_conf

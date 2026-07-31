@@ -10,7 +10,7 @@ import time
 import tiktoken
 
 # Add backend to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # Import the exact pipeline modules
 from app.domain.medical_library.pdf_extractor import extract_chapters, _clean_text
@@ -18,7 +18,7 @@ from app.domain.medical_library.chunker import chunk_all_sections, chunk_section
 
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
-BOOKS_DIR = os.path.join(os.path.dirname(__file__), "books")
+BOOKS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "books")
 
 DIAGNOSTIC_BOOKS = [
     ("Harrison's Principles of Internal Medicine", "Disease Knowledge/Harrisons-Principles-of-Internal-Medicine-20th-Edition-Vol.1-Vol.2-Part-1.pdf"),

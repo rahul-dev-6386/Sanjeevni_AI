@@ -12,14 +12,21 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> User:
     auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
+    token = None
+    
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+    else:
+        # Fallback to HttpOnly cookie since the frontend cannot read it to set the header
+        token = request.cookies.get("access_token")
+
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Authorization header",
+            detail="Missing or invalid Authorization header or cookie",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = auth_header.split(" ", 1)[1]
     payload = decode_access_token(token)
     if payload is None:
         raise HTTPException(

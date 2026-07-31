@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import Optional, Generator
 from sqlalchemy.orm import Session
 
@@ -10,14 +11,8 @@ logger = logging.getLogger("ai_provider")
 
 PROVIDER_FALLBACK = "fallback"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-
-OPENROUTER_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "openai/gpt-oss-120b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
-]
+BASE_TIMEOUT = 60.0
+RETRY_TIMEOUT = 120.0
 
 
 class ProviderResult:
@@ -47,22 +42,50 @@ def _parse_json(text: str) -> Optional[dict]:
 
 
 class OpenRouterProvider:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, models_str: Optional[str] = None):
         self.name = "openrouter"
-        self.models = list(OPENROUTER_MODELS)
         self.client = None
         self.last_model_used = ""
+        self.models_str = models_str
+        self.models = self._parse_models()
         if api_key:
             from openai import OpenAI
-            self.client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
-        self._latency: dict[str, float] = {}
-        self._last_used: dict[str, float] = {}
-        self._failures: dict[str, int] = {}
-        self._total_calls = 0
-        self._cooldown_until: dict[str, float] = {}
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url=OPENROUTER_BASE_URL,
+                timeout=BASE_TIMEOUT,
+                max_retries=0,
+            )
+        self._check_configuration()
+
+    def _parse_models(self) -> list[str]:
+        raw = self.models_str if self.models_str is not None else settings.OPENROUTER_MODELS
+        models = [m.strip() for m in raw.split(",") if m.strip()]
+        return models or ["nvidia/nemotron-3-ultra:free"]
+
+    def _check_configuration(self):
+        fail = False
+        if not settings.OPENROUTER_API_KEY:
+            logger.error("Sanjeevni AI cannot start: OPENROUTER_API_KEY is not set in configuration (.env)")
+            fail = True
+        if not self.models:
+            logger.error("Sanjeevni AI cannot start: OPENROUTER_MODELS is empty in configuration (.env)")
+            fail = True
+        if fail:
+            return
+
+        chain = " -> ".join(self.models)
+        logger.info("Sanjeevni AI: OpenRouter provider configured")
+        logger.info(f"  Primary: {self.models[0]}")
+        for i, m in enumerate(self.models[1:], 1):
+            logger.info(f"  Fallback {i}: {m}")
+        logger.info(f"  Full chain: {chain}")
 
     def is_available(self) -> bool:
-        return self.client is not None
+        return self.client is not None and len(self.models) > 0
+
+    def has_usable_model(self) -> bool:
+        return self.is_available()
 
     def _build_messages(self, prompt: str, system_instruction: Optional[str] = None) -> list[dict]:
         messages = []
@@ -71,85 +94,126 @@ class OpenRouterProvider:
         messages.append({"role": "user", "content": prompt})
         return messages
 
-    def _sort_models(self) -> list[str]:
-        now = __import__("time").time()
-        scored = []
-        for m in self.models:
-            cooldown = self._cooldown_until.get(m, 0)
-            if cooldown > now:
-                continue
-            if m in self._latency:
-                score = self._latency[m]
-            else:
-                score = 999.0
-            scored.append((score, m))
-        scored.sort(key=lambda x: x[0])
-        return [m for _, m in scored]
+    def _make_client(self, timeout: float):
+        from openai import OpenAI
+        return OpenAI(
+            api_key=settings.OPENROUTER_API_KEY,
+            base_url=OPENROUTER_BASE_URL,
+            timeout=timeout,
+            max_retries=0,
+        )
 
-    def _record_success(self, model: str, elapsed: float):
-        now = __import__("time").time()
-        if model in self._latency:
-            self._latency[model] = 0.7 * self._latency[model] + 0.3 * elapsed
-        else:
-            self._latency[model] = elapsed
-        self._last_used[model] = now
-        self._failures[model] = 0
-        self._total_calls += 1
+    def _classify_error(self, error: Exception) -> str:
+        status_str = str(error)
+        msg = status_str.lower()
+        if "429" in status_str or "rate limit" in msg or "too many requests" in msg:
+            return "rate_limited"
+        if "401" in status_str or "unauthorized" in msg or "invalid api key" in msg or "invalid_api_key" in msg:
+            return "invalid_key"
+        if "402" in status_str:
+            return "insufficient_credits"
+        if "500" in status_str or "502" in status_str or "503" in status_str or "504" in status_str:
+            return "server_error"
+        if "timeout" in msg or "timed out" in msg or "read timed out" in msg:
+            return "timeout"
+        if "connection" in msg or "unreachable" in msg or "unavailable" in msg or "econnrefused" in msg or "econnreset" in msg:
+            return "unavailable"
+        if "model not found" in msg or "model_not_found" in msg or "does not exist" in msg or "not a valid model" in msg:
+            return "model_not_found"
+        return "unknown"
+
+    def _log_switch(self, from_model: str, to_model: str, reason: str):
+        logger.info(f"  {from_model} -> {to_model}  Reason: {reason}")
+
+    def _generate_with_retry(self, model: str, messages: list, temperature: float, is_retry: bool = False) -> str:
+        client = self._make_client(RETRY_TIMEOUT) if is_retry else self.client
+        t0 = time.time()
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+        )
+        content = response.choices[0].message.content or ""
+        elapsed = time.time() - t0
+        tag = " (retry)" if is_retry else ""
+        logger.info(f"  {model}{tag} responded in {elapsed:.2f}s")
         self.last_model_used = model
-
-    def _record_failure(self, model: str, is_rate_limit: bool):
-        now = __import__("time").time()
-        fails = self._failures.get(model, 0) + 1
-        self._failures[model] = fails
-        if is_rate_limit:
-            backoff = min(120, (2 ** fails) * 15)
-            self._cooldown_until[model] = now + backoff
-            logger.info(f"  {model} rate-limited, cooling down {backoff}s")
-
-    def _pick_probe_model(self) -> Optional[str]:
-        now = __import__("time").time()
-        best = None
-        best_time = float("inf")
-        for m in self.models:
-            cooldown = self._cooldown_until.get(m, 0)
-            if cooldown > now:
-                continue
-            last = self._last_used.get(m, 0)
-            if last < best_time:
-                best_time = last
-                best = m
-        return best
+        return content
 
     def generate_response(self, prompt: str, system_instruction: Optional[str] = None, temperature: float = 0.3) -> str:
-        import time
+        if not self.client:
+            raise Exception("OpenRouter API key not configured")
+        if not self.models:
+            raise Exception("OpenRouter model list is empty")
+
         messages = self._build_messages(prompt, system_instruction)
         last_error = None
-        candidates = self._sort_models()
 
-        probe = None
-        if candidates and self._total_calls > 0 and self._total_calls % 10 == 0:
-            probe = self._pick_probe_model()
-            if probe and probe not in candidates:
-                candidates.insert(0, probe)
-
-        for model in candidates:
-            t0 = time.time()
+        for i, model in enumerate(self.models):
+            is_last = i == len(self.models) - 1
             try:
-                response = self.client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                )
-                content = response.choices[0].message.content or ""
-                elapsed = time.time() - t0
-                self._record_success(model, elapsed)
-                logger.info(f"  {model} responded in {elapsed:.2f}s (avg={self._latency[model]:.2f}s)")
-                return content
+                return self._generate_with_retry(model, messages, temperature, is_retry=False)
             except Exception as e:
-                elapsed = time.time() - t0
-                is_429 = "429" in str(e)
-                self._record_failure(model, is_429)
-                logger.warning(f"  {model} failed in {elapsed:.1f}s: {e}")
+                error_type = self._classify_error(e)
+                elapsed = time.time() - time.time()
+
+                if error_type == "invalid_key":
+                    logger.error(f"  {model} invalid API key - aborting")
+                    raise Exception(f"OpenRouter API key is invalid or rejected for {model}")
+
+                if error_type == "model_not_found":
+                    logger.warning(f"  {model} model not found on OpenRouter, skipping")
+                    if not is_last:
+                        self._log_switch(model, self.models[i + 1], "Model not found")
+                    last_error = e
+                    continue
+
+                if error_type == "rate_limited":
+                    logger.warning(f"  {model} returned HTTP 429 (rate limited), skipping to next")
+                    if not is_last:
+                        self._log_switch(model, self.models[i + 1], "HTTP 429")
+                    last_error = e
+                    continue
+
+                if error_type == "insufficient_credits":
+                    logger.warning(f"  {model} insufficient credits, skipping to next")
+                    if not is_last:
+                        self._log_switch(model, self.models[i + 1], "Insufficient credits (HTTP 402)")
+                    last_error = e
+                    continue
+
+                if error_type == "server_error":
+                    logger.warning(f"  {model} returned HTTP 5xx, retrying once")
+                    try:
+                        return self._generate_with_retry(model, messages, temperature, is_retry=True)
+                    except Exception as e2:
+                        logger.warning(f"  {model} server error (retry failed), skipping to next")
+                        if not is_last:
+                            self._log_switch(model, self.models[i + 1], "HTTP 500/502/503/504 (retry exhausted)")
+                        last_error = e2
+                        continue
+
+                if error_type == "timeout":
+                    logger.warning(f"  {model} timed out (timeout={BASE_TIMEOUT}s), retrying once with timeout={RETRY_TIMEOUT}s")
+                    try:
+                        return self._generate_with_retry(model, messages, temperature, is_retry=True)
+                    except Exception as e2:
+                        logger.warning(f"  {model} timeout (retry failed), skipping to next")
+                        if not is_last:
+                            self._log_switch(model, self.models[i + 1], "Timeout (retry exhausted)")
+                        last_error = e2
+                        continue
+
+                if error_type == "unavailable":
+                    logger.warning(f"  {model} provider unavailable, skipping to next")
+                    if not is_last:
+                        self._log_switch(model, self.models[i + 1], "Provider unavailable")
+                    last_error = e
+                    continue
+
+                logger.warning(f"  {model} failed: {e}")
+                if not is_last:
+                    self._log_switch(model, self.models[i + 1], str(e)[:100])
                 last_error = e
                 continue
 
@@ -165,12 +229,16 @@ class OpenRouterProvider:
         return {"error": "Failed to parse structured response", "raw": text}
 
     def generate_response_stream(self, prompt: str, system_instruction: Optional[str] = None, temperature: float = 0.3):
-        import time
+        if not self.client:
+            raise Exception("OpenRouter API key not configured")
+        if not self.models:
+            raise Exception("OpenRouter model list is empty")
+
         messages = self._build_messages(prompt, system_instruction)
         last_error = None
-        candidates = self._sort_models()
 
-        for model in candidates:
+        for i, model in enumerate(self.models):
+            is_last = i == len(self.models) - 1
             t0 = time.time()
             try:
                 response = self.client.chat.completions.create(
@@ -184,16 +252,27 @@ class OpenRouterProvider:
                     if delta and delta.content:
                         yield delta.content
                 elapsed = time.time() - t0
-                self._record_success(model, elapsed)
-                logger.info(f"  {model} streamed in {elapsed:.2f}s (avg={self._latency[model]:.2f}s)")
+                logger.info(f"  {model} streamed in {elapsed:.2f}s")
+                self.last_model_used = model
                 return
             except Exception as e:
-                elapsed = time.time() - t0
-                is_429 = "429" in str(e)
-                self._record_failure(model, is_429)
-                logger.warning(f"  {model} stream failed in {elapsed:.1f}s: {e}")
+                error_type = self._classify_error(e)
+                if error_type == "invalid_key":
+                    logger.error(f"  {model} invalid API key - aborting stream")
+                    raise
+                if error_type == "rate_limited":
+                    logger.warning(f"  {model} rate-limited (429), skipping")
+                elif error_type == "server_error":
+                    logger.warning(f"  {model} server error, skipping")
+                elif error_type == "timeout":
+                    logger.warning(f"  {model} timeout, skipping")
+                else:
+                    logger.warning(f"  {model} stream failed: {e}")
+                if not is_last:
+                    self._log_switch(model, self.models[i + 1], error_type)
                 last_error = e
                 continue
+
         if last_error:
             raise last_error
 
@@ -201,6 +280,9 @@ class OpenRouterProvider:
 class LocalFallbackProvider:
     def generate_response(self, prompt: str, system_instruction: Optional[str] = None, temperature: float = 0.3) -> str:
         text_lower = prompt.lower()
+        sys_lower = (system_instruction or "").lower()
+        if "drug monograph" in text_lower or "drug monograph" in sys_lower or "drug:" in text_lower:
+            return self._drug_monograph_response(prompt)
         if "routine" in text_lower or "daily" in text_lower or "plan" in text_lower:
             return self._routine_response(prompt)
         if "summary" in text_lower or "summarize" in text_lower:
@@ -271,11 +353,29 @@ class LocalFallbackProvider:
             "For a more detailed analysis, please provide additional context or consult your healthcare provider."
         )
 
+    def _drug_monograph_response(self, prompt: str) -> str:
+        import re
+        drug_name = "Medication"
+        match = re.search(r'DRUG:\s*(.+)', prompt, re.IGNORECASE)
+        if match:
+            drug_name = match.group(1).strip()
+
+        return (
+            f"# {drug_name}\n\n"
+            "## Overview\n"
+            "This is a fallback AI generated response. Detailed clinical information is currently unavailable because the primary AI service is experiencing high load or rate limits.\n\n"
+            "## Information\n"
+            "Please consult the verified database section or a healthcare provider for accurate and detailed clinical information about this medication.\n\n"
+            "## References\n"
+            "- System Fallback"
+        )
+
 
 class AIProviderService:
     def __init__(self, db: Optional[Session] = None):
         self.db = db
         self.provider = None
+        self.rag_provider = None
         self.fallback = LocalFallbackProvider()
         self._init_providers()
 
@@ -284,9 +384,18 @@ class AIProviderService:
             p = OpenRouterProvider(settings.OPENROUTER_API_KEY)
             if p.is_available():
                 self.provider = p
-                logger.info(f"OpenRouter provider initialized with {len(p.models)} models: {p.models[0]} ... {p.models[-1]}")
+
+            rag_models = getattr(settings, "RAG_FORMATTING_MODELS", None)
+            if rag_models:
+                rag_p = OpenRouterProvider(settings.OPENROUTER_API_KEY, models_str=rag_models)
+                if rag_p.is_available():
+                    self.rag_provider = rag_p
+            else:
+                self.rag_provider = p
+
+            if self.provider:
                 return
-        logger.warning("No OpenRouter API key configured — using local fallback only")
+        logger.warning("No OpenRouter API key configured - using local fallback only")
 
     def _get_cache(self, cache_key: str) -> Optional[dict]:
         if not self.db:
@@ -318,7 +427,7 @@ class AIProviderService:
         except Exception:
             self.db.rollback()
 
-    def _execute(self, request_type: str, method: str, prompt: str, system_instruction: Optional[str] = None, temperature: float = 0.3, use_cache: bool = True) -> ProviderResult:
+    def _execute(self, request_type: str, method: str, prompt: str, system_instruction: Optional[str] = None, temperature: float = 0.3, use_cache: bool = True, use_rag_models: bool = False) -> ProviderResult:
         cache_key = AICache.make_key(request_type, prompt, system_instruction or "")
         if use_cache:
             cached = self._get_cache(cache_key)
@@ -330,18 +439,19 @@ class AIProviderService:
         if method == "generate_response":
             kwargs["temperature"] = temperature
 
-        if self.provider:
-            logger.info(f"Trying OpenRouter")
+        provider_to_use = self.rag_provider if use_rag_models and self.rag_provider else self.provider
+
+        if provider_to_use:
             try:
                 model_used = ""
                 if method == "generate_response":
-                    content = self.provider.generate_response(prompt, **kwargs)
-                    model_used = getattr(self.provider, "last_model_used", "")
-                    result = ProviderResult(self.provider.name, True, content=content, model_used=model_used)
+                    content = provider_to_use.generate_response(prompt, **kwargs)
+                    model_used = getattr(provider_to_use, "last_model_used", "")
+                    result = ProviderResult(provider_to_use.name, True, content=content, model_used=model_used)
                 elif method == "generate_structured":
-                    data = self.provider.generate_structured(prompt, **kwargs)
-                    model_used = getattr(self.provider, "last_model_used", "")
-                    result = ProviderResult(self.provider.name, True, content=json.dumps(data), data=data, model_used=model_used)
+                    data = provider_to_use.generate_structured(prompt, **kwargs)
+                    model_used = getattr(provider_to_use, "last_model_used", "")
+                    result = ProviderResult(provider_to_use.name, True, content=json.dumps(data), data=data, model_used=model_used)
                 else:
                     result = ProviderResult(PROVIDER_FALLBACK, False, content="", error=f"Unknown method: {method}")
                 self._set_cache(cache_key, request_type, prompt, result.provider, {"provider": result.provider, "content": result.content, "data": result.data})
@@ -359,16 +469,19 @@ class AIProviderService:
                 result = ProviderResult(PROVIDER_FALLBACK, True, content=json.dumps(data), data=data)
             else:
                 result = ProviderResult(PROVIDER_FALLBACK, False, content="", error=f"Unknown method: {method}")
-            self._set_cache(cache_key, request_type, prompt, result.provider, {"provider": result.provider, "content": result.content, "data": result.data})
             return result
         except Exception as e:
             return ProviderResult(PROVIDER_FALLBACK, False, content="", error=str(e))
 
     def generate_response(self, prompt: str, system_instruction: Optional[str] = None, temperature: float = 0.3) -> str:
-        result = self._execute("generate_response", "generate_response", prompt, system_instruction, temperature)
+        use_rag_models = system_instruction and "medical RAG formatting agent" in system_instruction
+        result = self._execute("generate_response", "generate_response", prompt, system_instruction, temperature, use_rag_models=use_rag_models)
         if not result.success:
             return "AI temporarily unavailable. Please try again later."
         return result.content
+
+    def has_usable_model(self) -> bool:
+        return self.provider is not None and self.provider.has_usable_model()
 
     def generate_structured(self, prompt: str, system_instruction: Optional[str] = None) -> dict:
         result = self._execute("generate_structured", "generate_structured", prompt, system_instruction)

@@ -1,8 +1,11 @@
 import os
 import uuid
+import logging
 from typing import Optional
 from sqlalchemy.orm import Session
-from fastapi import UploadFile
+from fastapi import UploadFile, BackgroundTasks
+
+logger = logging.getLogger(__name__)
 from datetime import datetime
 
 from app.models.report import MedicalReport
@@ -73,15 +76,74 @@ class ReportService:
         if risk_scores:
             report.risk_scores = risk_scores
 
-        summary_prompt = (
+        meds = structured.get("medications", [])
+        med_names = [m.get("name") for m in meds if m.get("name")]
+        
+        interaction_context = ""
+        analysis_source = "AI"
+        if len(med_names) > 1:
+            from app.services.drug_service import DrugService
+            ds = DrugService(self.db)
+            db_interactions = ds.get_interactions(med_names)
+            if db_interactions:
+                interaction_context = "Drug Interactions found in Database:\n" + str(db_interactions)
+                analysis_source = "Database"
+            else:
+                try:
+                    from app.domain.medical_library.retriever import search as lib_search
+                    query = f"drug interactions between {' and '.join(med_names)}"
+                    rag_results = lib_search(query, top_k=3, use_hybrid=False)
+                    if rag_results:
+                        interaction_context = "Drug Interactions found in Medical Library (RAG):\n" + "\n".join([r.get("text", "") for r in rag_results])
+                        analysis_source = "Medical Library (RAG)"
+                except Exception as e:
+                    logger.warning(f"RAG search failed for interactions: {e}")
+        elif len(med_names) == 1:
+            from app.services.hybrid_drug_service import HybridDrugService
+            hds = HybridDrugService(self.db)
+            drug_info = hds.hybrid_retrieve(med_names[0])
+            drug_interactions = drug_info.drug.get("drug_interactions")
+            if drug_interactions:
+                interaction_context = f"Drug Interactions for {med_names[0]}:\n{drug_interactions}"
+                source = drug_info.metadata.source_type.value
+                analysis_source = "Database" if source == "verified" else "Medical Library (RAG)" if source == "hybrid" else "AI"
+
+        analysis_prompt = (
             f"Document type: {report.document_type}\n"
-            f"Structured data: {structured}\n\n"
-            "Generate 2-3 concise sentences summarizing this medical document's key findings. "
-            "Focus on actionable medical information only. No markdown."
+            f"Extracted Document Text:\n---\n{extracted[:8000]}\n---\n\n"
+            "Act as Sanjeevni AI, an advanced and experienced clinical medical copilot. "
+            "You do not just extract text; you understand the document, verify information, explain it, and identify risks. "
+            "Generate a comprehensive, clinician-style report with the following EXACT structure and emojis. Ensure it contains both a Medical View and a Patient-Friendly Explanation.\n\n"
+            "# 📋 Medical Document Analysis\n\n"
+            "## 1. 🧑‍⚕️ Patient Summary\n"
+            "Provide a Markdown table with Fields: Document Type, Hospital, Visit Date, Patient, Age, Sex, Weight. (Fill in 'Not documented' if missing).\n\n"
+            "## 2. 🩺 Diagnosis & Clinical Impression\n"
+            "Include subheadings: **Chief Complaint**, **Provisional Diagnosis**, **Final Diagnosis**, and **Severity Assessment** (with a confidence level).\n\n"
+            "## 3. 💊 Medication Explanation & Validation\n"
+            "For each medication, create a numbered subheading (e.g., '### 1. Drug Name').\n"
+            "Include bullet points for: **Purpose**, **Why prescribed**, **Dose**, **Frequency**, **Duration**, **Prescription Validation** (is dose/duration appropriate?), and **Common Side Effects**.\n\n"
+            "## 4. 🚨 Drug Interaction Analysis\n"
+            "Provide a Markdown table with 'Drugs' and 'Result', followed by 'Overall interaction risk: (e.g. 🟢 Low, 🟡 Moderate, 🔴 High)'.\n"
+            f"IMPORTANT: Use the following reference context for interactions if available. If none, use your AI knowledge. You MUST explicitly state at the end of this section: 'Analysis performed using {analysis_source} reference.'\n"
+            f"Reference Context: {interaction_context}\n\n"
+            "## 5. ⚠️ Missing Clinical Information & Potential Red Flags\n"
+            "List clinically important missing details (e.g., allergies, bite category) and potential red flags.\n\n"
+            "## 6. 📈 Risk Assessment\n"
+            "Provide a table of Conditions and Risk levels (e.g., 🔴 High, 🟠 Moderate, 🟡 Mild, 🟢 Low).\n\n"
+            "## 7. 📚 Clinical Reasoning\n"
+            "Explain the rationale behind the treatment plan like an expert clinician.\n\n"
+            "## 8. 🔬 Evidence-Based Recommendations\n"
+            "Provide evidence-based guidance (citing sources like DailyMed, OpenFDA, or clinical guidelines).\n\n"
+            "## 9. 📅 Follow-up Timeline\n"
+            "Provide a Markdown table with columns 'Visit' (e.g. Day 3, Day 7) and 'Purpose', acting as a checklist.\n\n"
+            "## 10. 🗣️ Patient-Friendly Explanation\n"
+            "A summary written in simple, non-medical language for the patient to easily understand their condition and what they need to do (e.g., wash wound, take meds, follow up).\n\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "- Return ONLY valid Markdown. Use bold drug names and bullet lists where appropriate."
         )
         report.ai_summary = ai_provider.generate_response(
-            prompt=summary_prompt,
-            system_instruction="You are a medical report summarizer. Be concise and clinical.",
+            prompt=analysis_prompt,
+            system_instruction="You are an expert medical AI assistant providing a detailed clinical analysis in Markdown.",
         )
 
         report.processed = True
@@ -102,7 +164,7 @@ class ReportService:
 
         return report
 
-    async def upload_async(self, user_id: int, file: UploadFile) -> MedicalReport:
+    async def upload_async(self, user_id: int, file: UploadFile, background_tasks: BackgroundTasks) -> MedicalReport:
         file_bytes = await file.read()
         file_ext = os.path.splitext(file.filename)[1]
         file_id = str(uuid.uuid4())
@@ -128,8 +190,12 @@ class ReportService:
         self.db.refresh(report)
 
         from app.workers.report_worker import process_report
-        q = get_queue()
-        q.enqueue(process_report, report.id)
+        try:
+            q = get_queue()
+            q.enqueue(process_report, report.id)
+        except Exception as e:
+            logger.warning(f"Failed to enqueue report {report.id} to Redis (async). Falling back to FastAPI BackgroundTasks. Error: {e}")
+            background_tasks.add_task(process_report, report.id)
 
         return report
 

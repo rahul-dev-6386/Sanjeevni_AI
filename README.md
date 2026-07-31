@@ -300,11 +300,14 @@ Supports: targeted ingestion, incremental updates (tracks revision dates), withd
 │   │   │   └── ...                   # email, otp, auth, routines, memory
 │   │   └── workers/                  # Background task processing (Redis)
 │   ├── alembic/                      # Database migrations
-│   ├── scripts/                      # Data ingestion & ML training
+│   ├── scripts/                      # Utility scripts
+│   │   ├── ingestion/                # Book, drug, guideline ingestion
+│   │   ├── enrichment/               # Drug data enrichment
+│   │   ├── diagnostics/              # Extraction/quality diagnostics
+│   │   └── maintenance/              # Retraining, reprocessing
 │   └── requirements.txt
 │
 ├── books/                            # Medical textbooks (PDF)
-├── data/                             # Qdrant on-disk, BM25 cache
 ├── docker-compose.yml
 ├── start.sh
 └── .env.example

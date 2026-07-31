@@ -10,6 +10,9 @@ from app.services.drug_sources import SOURCE_PRIORITY
 
 logger = logging.getLogger("drug_service")
 
+# text-embedding-3-small supports up to 8192 tokens (~32k chars for English)
+MAX_EMBEDDING_CHARS = 24000
+
 # All DrugEntry fields that can be serialized to the API
 SERIALIZABLE_FIELDS = [
     "id",
@@ -143,9 +146,19 @@ class DrugService:
 
     def store_drug(self, drug_data: dict) -> Optional[DrugEntry]:
         """Store drug data from any source. Creates new entry or merges into existing."""
+        try:
+            return self._store_drug_impl(drug_data)
+        except Exception as e:
+            logger.warning(f"store_drug failed: {e}")
+            self.db.rollback()
+            return None
+
+    def _store_drug_impl(self, drug_data: dict) -> Optional[DrugEntry]:
         generic_name = drug_data.get("generic_name")
         if not generic_name:
             return None
+
+        generic_name = generic_name[:500]
 
         existing = (
             self.db.query(DrugEntry)
@@ -154,7 +167,6 @@ class DrugService:
         )
 
         if existing:
-            # Merge: fill only null fields on existing record
             merged = False
             for key in SERIALIZABLE_FIELDS:
                 if key in ("id", "embedding_id", "ingested_at", "data_sources"):
@@ -165,10 +177,9 @@ class DrugService:
                     setattr(existing, key, new_val)
                     merged = True
             if merged:
-                # Regenerate embedding with richer text
-                text = self._build_drug_text(self._entry_to_dict(existing))
+                text = self._build_drug_text(self._entry_to_dict(existing))[:MAX_EMBEDDING_CHARS]
                 emb = embedding_service.embed_document(text)
-                existing.embedding_id = f"drug_{generic_name.lower().replace(' ', '_')}"
+                existing.embedding_id = f"drug_{generic_name.lower().replace(' ', '_')}"[:255]
                 vector_store.upsert(
                     embedding_id=existing.embedding_id,
                     embedding=emb["embedding"],
@@ -177,10 +188,9 @@ class DrugService:
                 self.db.commit()
             return existing
 
-        # New entry
-        text_for_embedding = self._build_drug_text(drug_data)
+        text_for_embedding = self._build_drug_text(drug_data)[:MAX_EMBEDDING_CHARS]
         embedding_data = embedding_service.embed_document(text_for_embedding)
-        embedding_id = f"drug_{generic_name.lower().replace(' ', '_')}"
+        embedding_id = f"drug_{generic_name.lower().replace(' ', '_')}"[:255]
 
         entry = DrugEntry(generic_name=generic_name, embedding_id=embedding_id)
         for key in SERIALIZABLE_FIELDS:

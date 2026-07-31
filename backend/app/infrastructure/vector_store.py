@@ -50,6 +50,19 @@ class VectorStore:
                     distance=qm.Distance.COSINE,
                 ),
             )
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name="type",
+                    field_schema=qm.PayloadSchemaType.KEYWORD,
+                )
+                self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name="user_id",
+                    field_schema=qm.PayloadSchemaType.INTEGER,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create payload index: {e}")
 
     def _point_id(self, embedding_id: str) -> int:
         return hash(embedding_id) % (2**63 - 1)

@@ -6,7 +6,7 @@ Focused extraction diagnostics:
 """
 
 import sys, os, re, time, fitz, tiktoken
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from app.domain.medical_library.pdf_extractor import CHAPTER_PATTERN, SECTION_PATTERN, HEADER_FOOTER_PATTERNS, _clean_text, RUNNING_HEADER_THRESHOLD
 
 tokenizer = tiktoken.get_encoding("cl100k_base")

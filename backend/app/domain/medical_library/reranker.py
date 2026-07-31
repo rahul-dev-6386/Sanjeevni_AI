@@ -1,69 +1,156 @@
 import logging
-from typing import Optional
+import os
+import time
+import threading
 
-logger = logging.getLogger("medical_library")
+import httpx
 
-RERANKER_MODEL = "BAAI/bge-reranker-large"
-_reranker_model = None
-_reranker_tokenizer = None
-_reranker_available = True
+from app.core.config import settings
 
+logger = logging.getLogger("medical_library.reranker")
 
-def _get_direct_reranker():
-    global _reranker_model, _reranker_tokenizer, _reranker_available
-    if _reranker_model is not None:
-        return _reranker_model, _reranker_tokenizer
-    if not _reranker_available:
-        return None, None
-    try:
-        import torch
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+JINA_RERANK_URL = "https://api.jina.ai/v1/rerank"
+JINA_MODEL = "jina-reranker-v2-base-multilingual"
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Loading reranker model (direct): {RERANKER_MODEL} on {device}")
-        _reranker_tokenizer = AutoTokenizer.from_pretrained(RERANKER_MODEL)
-        _reranker_model = AutoModelForSequenceClassification.from_pretrained(
-            RERANKER_MODEL
-        ).to(device)
-        _reranker_model.eval()
-        logger.info("Reranker model (direct) loaded")
-    except Exception as e:
-        logger.warning(f"Reranker unavailable (torch/transformers not installed): {e}")
-        _reranker_available = False
-        _reranker_model = None
-        _reranker_tokenizer = None
-    return _reranker_model, _reranker_tokenizer
+# ── Concurrency guard ─────────────────────────────────────────────────────────
+# Jina free tier: max 2 concurrent requests.
+# This semaphore queues all callers so we never exceed that limit.
+_JINA_SEMAPHORE = threading.BoundedSemaphore(2)
+
+# ── Retry settings ────────────────────────────────────────────────────────────
+_MAX_RETRIES = 4
+_RETRY_BASE_DELAY = 2.0   # seconds; doubles each attempt: 2 → 4 → 8 → 16
 
 
-def rerank(query: str, results: list[dict], top_k: int = 5) -> list[dict]:
+def _rerank_via_jina(query: str, results: list[dict], top_k: int) -> list[dict] | None:
+    """
+    Calls the Jina AI Reranker API (free tier).
+
+    Concurrency-safe: a BoundedSemaphore(2) ensures at most 2 simultaneous
+    HTTP calls are in-flight. Extra callers wait their turn rather than
+    hammering the API and getting 429 RATE_CONCURRENCY errors.
+
+    On 429 we also do exponential-backoff retries.
+    """
+    api_key = settings.JINA_API_KEY
+    if not api_key:
+        return None
+
+    documents = [r.get("text", "") for r in results]
+    if not documents:
+        return None
+
+    payload = {
+        "model": JINA_MODEL,
+        "query": query,
+        "documents": documents,
+        "top_n": top_k,
+        "return_documents": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    for attempt in range(1, _MAX_RETRIES + 1):
+        # Block until a slot opens — guarantees ≤2 concurrent Jina calls
+        logger.debug(f"Jina reranker: waiting for semaphore (attempt {attempt})")
+        _JINA_SEMAPHORE.acquire()
+        try:
+            with httpx.Client(timeout=30) as client:
+                resp = client.post(JINA_RERANK_URL, headers=headers, json=payload)
+
+            if resp.status_code == 429:
+                # Respect Retry-After if present, else exponential backoff
+                retry_after = float(
+                    resp.headers.get("Retry-After", _RETRY_BASE_DELAY * attempt)
+                )
+                logger.warning(
+                    f"Jina reranker 429 (attempt {attempt}/{_MAX_RETRIES}). "
+                    f"Sleeping {retry_after:.1f}s before retry…"
+                )
+                _JINA_SEMAPHORE.release()          # free the slot while we sleep
+                time.sleep(retry_after)
+                continue                            # re-acquire and retry
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            reranked_results = []
+            for item in data.get("results", []):
+                idx = item["index"]
+                score = item["relevance_score"]
+                result = dict(results[idx])
+                result["rerank_score"] = float(score)
+                reranked_results.append(result)
+
+            logger.info(
+                f"Jina reranker ✓ {len(reranked_results)} results "
+                f"(model={JINA_MODEL}, attempt={attempt})"
+            )
+            return reranked_results
+
+        except httpx.HTTPStatusError as e:
+            logger.warning(
+                f"Jina reranker HTTP {e.response.status_code} "
+                f"(attempt {attempt}/{_MAX_RETRIES}): {e.response.text[:200]}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Jina reranker error (attempt {attempt}/{_MAX_RETRIES}): {e}"
+            )
+        finally:
+            # Release only if we still hold the semaphore (429 path released early)
+            try:
+                _JINA_SEMAPHORE.release()
+            except ValueError:
+                pass   # already released in the 429 branch
+
+        if attempt < _MAX_RETRIES:
+            delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.info(f"Jina reranker: retrying in {delay:.1f}s…")
+            time.sleep(delay)
+
+    logger.warning("Jina reranker: all retries exhausted — falling back to score sort.")
+    return None
+
+
+def rerank(query: str, results: list[dict], top_k: int = 10) -> list[dict]:
+    """
+    Re-ranks retrieved chunks by relevance using the Jina AI API.
+
+    Strategy:
+      1. Jina API  (free, concurrency-safe, retry on 429)   → best quality
+      2. Fallback: sort by hybrid/vector score               → still good
+    """
     if not results:
         return []
 
-    model, tokenizer = _get_direct_reranker()
-    if model is None:
+    if os.getenv("DISABLE_RERANKER") == "1":
+        logger.debug("Reranker disabled via DISABLE_RERANKER env var.")
         return results[:top_k]
 
-    import torch
-    pairs = [(query, r.get("text", "")) for r in results]
+    reranked = _rerank_via_jina(query, results, top_k)
+    if reranked is not None:
+        return reranked
 
-    encoded = tokenizer(
-        pairs,
-        padding=True,
-        truncation=True,
-        max_length=512,
-        return_tensors="pt",
-    ).to(model.device)
+    # Fallback: sort by existing score
+    logger.info("Reranker fallback: sorting by hybrid/vector score.")
+    return sorted(
+        results,
+        key=lambda r: r.get("hybrid_score", r.get("score", 0)),
+        reverse=True,
+    )[:top_k]
 
-    with torch.no_grad():
-        outputs = model(**encoded)
-        scores = outputs.logits.squeeze(-1).tolist()
 
-    if isinstance(scores, float):
-        scores = [scores]
-
-    scored = []
-    for i, score in enumerate(scores):
-        scored.append({**results[i], "rerank_score": float(score)})
-
-    scored.sort(key=lambda x: x["rerank_score"], reverse=True)
-    return scored[:top_k]
+# Alias used by main.py startup pre-warm.
+def _get_direct_reranker():
+    if settings.JINA_API_KEY:
+        logger.info(f"Reranker: Jina AI API configured (model={JINA_MODEL})")
+    else:
+        logger.warning(
+            "Reranker: JINA_API_KEY not set. "
+            "Results will be sorted by vector score only. "
+            "Get a free key at https://jina.ai"
+        )
+    return None

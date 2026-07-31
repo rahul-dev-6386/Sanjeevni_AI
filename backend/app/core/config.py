@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None
     OPENROUTER_API_KEY: Optional[str] = None
+    OPENROUTER_MODELS: str = "openrouter/free,google/gemma-4-31b-it:free,nvidia/nemotron-3-ultra-550b-a55b:free,inclusionai/ling-3.0-flash:free"
+    RAG_FORMATTING_MODELS: str = "openrouter/free,google/gemma-4-31b-it:free,nvidia/nemotron-3-ultra-550b-a55b:free,inclusionai/ling-3.0-flash:free"
     GEMINI_API_KEY: Optional[str] = None
     STORAGE_BACKEND: str = "local"
     UPLOAD_DIR: str = "./uploads"
@@ -24,8 +26,8 @@ class Settings(BaseSettings):
     QDRANT_API_KEY: Optional[str] = None
     QDRANT_COLLECTION: str = "medical_knowledge"
     EMBEDDING_PROVIDER: str = "openrouter"
-    EMBEDDING_MODEL: str = "text-embedding-3-small"
-    EMBEDDING_DIMENSION: int = 1536
+    EMBEDDING_MODEL: str = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+    EMBEDDING_DIMENSION: int = 2048
 
     REDIS_URL: str = "redis://localhost:6379/0"
     CHUNK_SIZE: int = 500
@@ -36,6 +38,10 @@ class Settings(BaseSettings):
     DATASETS_DIR: str = "./data/datasets"
     CACHE_DIR: str = "./data/cache"
     SARVAM_API_KEY: Optional[str] = None
+
+    # Reranker — use Jina AI free API instead of a local model
+    # Get a free key at: https://jina.ai (no credit card needed, 1M tokens/month)
+    JINA_API_KEY: Optional[str] = None
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001"

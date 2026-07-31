@@ -22,8 +22,14 @@ export default function DrugSearch({
   const [showSuggestions, setShowSuggestions] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const submittedRef = useRef(false)
 
   useEffect(() => {
+    if (submittedRef.current) {
+      submittedRef.current = false
+      return
+    }
     if (debounceRef.current) clearTimeout(debounceRef.current)
     const q = query.trim()
     if (q.length < 2) {
@@ -46,12 +52,27 @@ export default function DrugSearch({
   }, [query])
 
   const clearSuggestions = () => {
+    if (blurTimeoutRef.current) clearTimeout(blurTimeoutRef.current)
     setSuggestions([])
     setShowSuggestions(false)
   }
 
+  const submitSearch = () => {
+    submittedRef.current = true
+    clearSuggestions()
+    onSearch()
+  }
+
   const selectSuggestion = (val: string) => {
+    submittedRef.current = true
     onQueryChange(val)
+    clearSuggestions()
+    setTimeout(() => onSearch(), 0)
+  }
+
+  const handleRecentClick = (term: string) => {
+    submittedRef.current = true
+    onQueryChange(term)
     clearSuggestions()
     setTimeout(() => onSearch(), 0)
   }
@@ -73,11 +94,13 @@ export default function DrugSearch({
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
           onFocus={() => setFocused(true)}
-          onBlur={() => setTimeout(clearSuggestions, 150)}
+          onBlur={() => { blurTimeoutRef.current = setTimeout(clearSuggestions, 150) }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
+              submitSearch()
+            } else if (e.key === "Escape") {
               clearSuggestions()
-              onSearch()
+              inputRef.current?.blur()
             }
           }}
           placeholder="Search by drug name, generic name, brand name, or therapeutic class..."
@@ -95,7 +118,7 @@ export default function DrugSearch({
           <motion.button
             whileHover={{ scale: 1.03 }}
             whileTap={{ scale: 0.97 }}
-            onClick={() => { clearSuggestions(); onSearch() }}
+            onClick={submitSearch}
             disabled={loading || !query.trim()}
             className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#0EA5A9] to-teal-500 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-[#0EA5A9]/15 transition-all hover:shadow-[#0EA5A9]/25 disabled:opacity-40"
           >
@@ -142,10 +165,7 @@ export default function DrugSearch({
             key={term}
             whileHover={{ scale: 1.03 }}
             whileTap={{ scale: 0.95 }}
-            onClick={() => {
-              onQueryChange(term)
-              setTimeout(() => onSearch(), 0)
-            }}
+            onClick={() => handleRecentClick(term)}
             className="rounded-full border border-white/[0.06] bg-white/[0.02] px-2.5 py-0.5 text-[11px] text-[#5A6B87] transition-all hover:border-[#0EA5A9]/25 hover:bg-[#0EA5A9]/[0.03] hover:text-[#8B9BB5]"
           >
             {term}
