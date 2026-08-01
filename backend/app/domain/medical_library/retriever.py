@@ -159,6 +159,9 @@ def _semantic_search(
 
 
 def _keyword_search(query: str, collection: str, top_k: int = 50) -> list[dict]:
+    from app.core.config import settings
+    if settings.DISABLE_BM25 == "1":
+        return []
     bm25, texts = _get_bm25_index(collection)
     if bm25 is None or not texts:
         return []

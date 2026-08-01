@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # Get a free key at: https://jina.ai (no credit card needed, 1M tokens/month)
     JINA_API_KEY: Optional[str] = None
 
+    # BM25 keyword search — disable on memory-constrained hosts (e.g. Render free).
+    # When "1", keyword search returns nothing and retrieval is vector-only,
+    # avoiding the ~300MB spike from building the in-memory BM25 index.
+    DISABLE_BM25: str = "0"
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
 
