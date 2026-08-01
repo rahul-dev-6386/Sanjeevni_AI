@@ -56,6 +56,7 @@ def _rerank_via_jina(query: str, results: list[dict], top_k: int) -> list[dict] 
         # Block until a slot opens — guarantees ≤2 concurrent Jina calls
         logger.debug(f"Jina reranker: waiting for semaphore (attempt {attempt})")
         _JINA_SEMAPHORE.acquire()
+        semaphore_held = True
         try:
             with httpx.Client(timeout=30) as client:
                 resp = client.post(JINA_RERANK_URL, headers=headers, json=payload)
@@ -70,6 +71,7 @@ def _rerank_via_jina(query: str, results: list[dict], top_k: int) -> list[dict] 
                     f"Sleeping {retry_after:.1f}s before retry…"
                 )
                 _JINA_SEMAPHORE.release()          # free the slot while we sleep
+                semaphore_held = False
                 time.sleep(retry_after)
                 continue                            # re-acquire and retry
 
@@ -100,11 +102,8 @@ def _rerank_via_jina(query: str, results: list[dict], top_k: int) -> list[dict] 
                 f"Jina reranker error (attempt {attempt}/{_MAX_RETRIES}): {e}"
             )
         finally:
-            # Release only if we still hold the semaphore (429 path released early)
-            try:
+            if semaphore_held:
                 _JINA_SEMAPHORE.release()
-            except ValueError:
-                pass   # already released in the 429 branch
 
         if attempt < _MAX_RETRIES:
             delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))

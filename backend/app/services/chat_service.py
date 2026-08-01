@@ -70,19 +70,6 @@ class ChatService:
         history = self.get_session_messages(session_id)
         conversation_context = self._build_conversation_context(history)
 
-        # Inject user context via ContextFusionService
-        fusion = ContextFusionService(self.db)
-        fusion_result = fusion.retrieve(query=content, user_id=user_id, top_k_textbooks=3, top_k_user=5)
-        user_context = ""
-        if fusion_result.contexts:
-            user_context = "\n\n## User's Medical Context\n"
-            for ctx in fusion_result.contexts[:8]:
-                src = ctx.get("source", "")
-                text = ctx.get("content", "")
-                if text:
-                    label = "Your Report" if src == "user_report_chunks" else "Textbook"
-                    user_context += f"[{label}] {text[:500]}\n\n"
-
         system_prompt = (
             "You are **Medico AI**. You are an evidence-based medical assistant. "
             "You provide structured, scannable health information from medical guidelines, research, and patient data. "
@@ -111,14 +98,15 @@ class ChatService:
             "- `## 💬 If You Have Your Results` — ask for specific values\n"
             "- `## 📚 References` — sources used\n\n"
             f"## Patient Profile\n{patient_summary}"
-            f"{user_context}"
         )
 
-        if route_result["citations"]:
-            citations_text = "\n\n📚 **Retrieved Sources:**\n"
-            for c in route_result["citations"]:
-                url = f" ({c['url']})" if c.get("url") else ""
-                citations_text += f"- {c['title']} — *{c['source']}*{url}\n"
+        if route_result.get("response"):
+            citations_text = ""
+            if route_result.get("citations"):
+                citations_text = "\n\n📚 **Retrieved Sources:**\n"
+                for c in route_result["citations"]:
+                    url = f" ({c['url']})" if c.get("url") else ""
+                    citations_text += f"- {c['title']} — *{c['source']}*{url}\n"
             system_prompt += f"\n\n## Retrieved Medical Knowledge\n{route_result['response']}{citations_text}"
 
         ai_response = ai_provider.generate_chat_response(
@@ -177,19 +165,6 @@ class ChatService:
         history = self.get_session_messages(session_id)
         conversation_context = self._build_conversation_context(history)
 
-        # Inject user context via ContextFusionService
-        fusion = ContextFusionService(self.db)
-        fusion_result = fusion.retrieve(query=content, user_id=user_id, top_k_textbooks=3, top_k_user=5)
-        user_context = ""
-        if fusion_result.contexts:
-            user_context = "\n\n## User's Medical Context\n"
-            for ctx in fusion_result.contexts[:8]:
-                src = ctx.get("source", "")
-                text = ctx.get("content", "")
-                if text:
-                    label = "Your Report" if src == "user_report_chunks" else "Textbook"
-                    user_context += f"[{label}] {text[:500]}\n\n"
-
         system_prompt = (
             "You are **Medico AI**. You are an evidence-based medical assistant. "
             "You provide structured, scannable health information from medical guidelines, research, and patient data. "
@@ -218,14 +193,15 @@ class ChatService:
             "- `## 💬 If You Have Your Results` — ask for specific values\n"
             "- `## 📚 References` — sources used\n\n"
             f"## Patient Profile\n{patient_summary}"
-            f"{user_context}"
         )
 
-        if route_result["citations"]:
-            citations_text = "\n\n📚 **Retrieved Sources:**\n"
-            for c in route_result["citations"]:
-                url = f" ({c['url']})" if c.get("url") else ""
-                citations_text += f"- {c['title']} — *{c['source']}*{url}\n"
+        if route_result.get("response"):
+            citations_text = ""
+            if route_result.get("citations"):
+                citations_text = "\n\n📚 **Retrieved Sources:**\n"
+                for c in route_result["citations"]:
+                    url = f" ({c['url']})" if c.get("url") else ""
+                    citations_text += f"- {c['title']} — *{c['source']}*{url}\n"
             system_prompt += f"\n\n## Retrieved Medical Knowledge\n{route_result['response']}{citations_text}"
 
         full_response = ""
